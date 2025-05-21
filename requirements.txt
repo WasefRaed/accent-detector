@@ -2,5 +2,6 @@ streamlit
 torch
 transformers
 torchaudio
-moviepy
+moviepy==1.0.3
 requests
+imageio-ffmpeg==0.4.7
