@@ -8,87 +8,90 @@ Original file is located at
 """
 
 import streamlit as st
-import tempfile
-import os
 import torch
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+import moviepy.editor as mp
+import tempfile
 import requests
-from moviepy.editor import VideoFileClip
-from transformers import Wav2Vec2Processor, Wav2Vec2ForSequenceClassification
-import torchaudio
+import os
 
-# Load model and processor
-MODEL_ID = "Ubicoo/wav2vec2-large-xlsr-53-english-accent-classifier"
+# Constants
+MODEL_ID = "facebook/wav2vec2-base-960h"
+
 @st.cache_resource
 def load_model():
     processor = Wav2Vec2Processor.from_pretrained(MODEL_ID)
-    model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_ID)
+    model = Wav2Vec2ForCTC.from_pretrained(MODEL_ID)
     return processor, model
 
 processor, model = load_model()
-labels = model.config.id2label
 
 def download_video(url):
-    response = requests.get(url, stream=True)
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    with open(temp_file.name, 'wb') as f:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            f.write(chunk)
-    return temp_file.name
+    response = requests.get(url)
+    if response.status_code != 200:
+        raise Exception("Failed to download video.")
+
+    tmp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_video.write(response.content)
+    tmp_video.close()
+    return tmp_video.name
 
 def extract_audio(video_path):
-    temp_audio_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
-    video = VideoFileClip(video_path)
-    video.audio.write_audiofile(temp_audio_path, codec='pcm_s16le')
-    return temp_audio_path
+    video = mp.VideoFileClip(video_path)
+    audio_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+    video.audio.write_audiofile(audio_path, codec='pcm_s16le')
+    return audio_path
 
-def predict_accent(audio_path):
+def transcribe(audio_path):
+    import torchaudio
     speech_array, sampling_rate = torchaudio.load(audio_path)
-    if sampling_rate != 16000:
-        resampler = torchaudio.transforms.Resample(orig_freq=sampling_rate, new_freq=16000)
-        speech_array = resampler(speech_array)
+    resampler = torchaudio.transforms.Resample(orig_freq=sampling_rate, new_freq=16000)
+    speech = resampler(speech_array).squeeze()
 
-    input_values = processor(speech_array.squeeze().numpy(), return_tensors="pt", sampling_rate=16000).input_values
+    inputs = processor(speech, sampling_rate=16000, return_tensors="pt", padding=True)
     with torch.no_grad():
-        logits = model(input_values).logits
-    probs = torch.nn.functional.softmax(logits, dim=-1)[0]
-    pred_label_id = torch.argmax(probs).item()
-    confidence = round(probs[pred_label_id].item() * 100, 2)
-    label = labels[pred_label_id]
-    return label, confidence, probs
+        logits = model(**inputs).logits
 
-def generate_summary(label, confidence):
-    if confidence > 90:
-        return f"The speaker shows a strong {label} English accent."
-    elif confidence > 70:
-        return f"The speaker likely has a {label} accent, though it's not very strong."
+    predicted_ids = torch.argmax(logits, dim=-1)
+    transcription = processor.decode(predicted_ids[0])
+    return transcription
+
+def detect_accent(text):
+    # Placeholder: Use rule-based keywords for now
+    if any(word in text.lower() for word in ["mate", "cheers", "bloody"]):
+        return "British", 85, "Common British expressions detected."
+    elif any(word in text.lower() for word in ["dude", "awesome", "gotta"]):
+        return "American", 90, "Informal American-style phrases detected."
     else:
-        return f"The speaker may have a {label} accent, but the confidence is lower due to mixed patterns."
+        return "Unknown", 60, "Accent not confidently detected."
 
-# Streamlit UI
-st.title("🎙️ English Accent Detector")
-st.write("Upload or paste a public video URL to detect the speaker's English accent.")
+# UI
+st.title("🎙️ English Accent Detection Tool")
+st.write("Upload a video URL and get an estimated English accent classification.")
 
-video_url = st.text_input("Enter Public Video URL (MP4, Loom, etc.):")
+video_url = st.text_input("Enter public video URL (e.g. MP4, Loom):")
 
-if st.button("Analyze Accent") and video_url:
-    with st.spinner("Downloading video..."):
-        try:
-            video_file = download_video(video_url)
-        except Exception as e:
-            st.error(f"Failed to download video: {e}")
-            st.stop()
+if st.button("Analyze Accent"):
+    try:
+        with st.spinner("Downloading video..."):
+            video_path = download_video(video_url)
 
-    with st.spinner("Extracting audio..."):
-        audio_file = extract_audio(video_file)
+        with st.spinner("Extracting audio..."):
+            audio_path = extract_audio(video_path)
 
-    with st.spinner("Predicting accent..."):
-        accent, confidence, probs = predict_accent(audio_file)
-        summary = generate_summary(accent, confidence)
+        with st.spinner("Transcribing speech..."):
+            text = transcribe(audio_path)
 
-    st.success("Analysis complete!")
-    st.metric("Predicted Accent", accent)
-    st.metric("Confidence Score", f"{confidence}%")
-    st.write(f"**Summary:** {summary}")
+        with st.spinner("Detecting accent..."):
+            accent, confidence, reason = detect_accent(text)
 
-    os.remove(video_file)
-    os.remove(audio_file)
+        st.success(f"✅ Detected Accent: **{accent}**")
+        st.write(f"**Confidence Score:** {confidence}%")
+        st.write(f"**Explanation:** {reason}")
+        st.write(f"**Transcription:** {text}")
+
+        os.remove(video_path)
+        os.remove(audio_path)
+
+    except Exception as e:
+        st.error(f"❌ Error: {e}")

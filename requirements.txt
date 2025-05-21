@@ -3,5 +3,6 @@ torch
 transformers
 torchaudio
 moviepy==1.0.3
-requests
 imageio-ffmpeg==0.4.7
+requests
+
