@@ -8,90 +8,95 @@ Original file is located at
 """
 
 import streamlit as st
-import torch
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
-import moviepy.editor as mp
-import tempfile
-import requests
 import os
+import tempfile
+import subprocess
+from moviepy.editor import VideoFileClip
+from pydub import AudioSegment
+import torch
+from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2Processor
 
-# Constants
-MODEL_ID = "facebook/wav2vec2-base-960h"
+MODEL_ID = "s3prl/s3prl-voice-type-classifier-apc"
+LABELS = ["american", "british", "australian", "indian", "others"]  # example
 
 @st.cache_resource
 def load_model():
     processor = Wav2Vec2Processor.from_pretrained(MODEL_ID)
-    model = Wav2Vec2ForCTC.from_pretrained(MODEL_ID)
+    model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_ID)
     return processor, model
 
-processor, model = load_model()
+def validate_mp4(file_path):
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-v', 'error', '-i', file_path, '-f', 'null', '-'],
+            stderr=subprocess.PIPE, stdout=subprocess.PIPE
+        )
+        return result.returncode == 0
+    except Exception as e:
+        st.error(f"Validation failed: {e}")
+        return False
 
-def download_video(url):
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise Exception("Failed to download video.")
+def repair_mp4(input_path, output_path):
+    try:
+        subprocess.run(
+            ['ffmpeg', '-i', input_path, '-c', 'copy', '-movflags', 'faststart', output_path],
+            check=True
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
-    tmp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp_video.write(response.content)
-    tmp_video.close()
-    return tmp_video.name
+def extract_audio_from_video(video_path):
+    try:
+        clip = VideoFileClip(video_path)
+        temp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        clip.audio.write_audiofile(temp_audio.name, codec='pcm_s16le')
+        return temp_audio.name
+    except Exception as e:
+        st.error(f"❌ Failed to extract audio: {e}")
+        return None
 
-def extract_audio(video_path):
-    video = mp.VideoFileClip(video_path)
-    audio_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
-    video.audio.write_audiofile(audio_path, codec='pcm_s16le')
-    return audio_path
-
-def transcribe(audio_path):
-    import torchaudio
-    speech_array, sampling_rate = torchaudio.load(audio_path)
-    resampler = torchaudio.transforms.Resample(orig_freq=sampling_rate, new_freq=16000)
-    speech = resampler(speech_array).squeeze()
-
-    inputs = processor(speech, sampling_rate=16000, return_tensors="pt", padding=True)
+def detect_accent(audio_path, processor, model):
+    audio = AudioSegment.from_wav(audio_path).set_channels(1).set_frame_rate(16000)
+    samples = audio.get_array_of_samples()
+    inputs = processor(samples, sampling_rate=16000, return_tensors="pt", padding=True)
     with torch.no_grad():
         logits = model(**inputs).logits
+        predicted_class = logits.argmax().item()
+    return LABELS[predicted_class], torch.nn.functional.softmax(logits, dim=1)[0][predicted_class].item()
 
-    predicted_ids = torch.argmax(logits, dim=-1)
-    transcription = processor.decode(predicted_ids[0])
-    return transcription
+def main():
+    st.title("🎙️ English Accent Detection App")
 
-def detect_accent(text):
-    # Placeholder: Use rule-based keywords for now
-    if any(word in text.lower() for word in ["mate", "cheers", "bloody"]):
-        return "British", 85, "Common British expressions detected."
-    elif any(word in text.lower() for word in ["dude", "awesome", "gotta"]):
-        return "American", 90, "Informal American-style phrases detected."
-    else:
-        return "Unknown", 60, "Accent not confidently detected."
+    uploaded_file = st.file_uploader("Upload a video (MP4 format)", type=["mp4"])
 
-# UI
-st.title("🎙️ English Accent Detection Tool")
-st.write("Upload a video URL and get an estimated English accent classification.")
+    if uploaded_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            tmp_file_path = tmp_file.name
 
-video_url = st.text_input("Enter public video URL (e.g. MP4, Loom):")
+        # Validate and optionally repair the video
+        if not validate_mp4(tmp_file_path):
+            st.warning("⚠️ Video is missing metadata. Attempting repair...")
+            repaired_path = tmp_file_path + "_repaired.mp4"
+            if not repair_mp4(tmp_file_path, repaired_path):
+                st.error("❌ Failed to repair video. Please upload a different file.")
+                return
+            tmp_file_path = repaired_path
 
-if st.button("Analyze Accent"):
-    try:
-        with st.spinner("Downloading video..."):
-            video_path = download_video(video_url)
+        # Extract audio
+        audio_path = extract_audio_from_video(tmp_file_path)
+        if not audio_path:
+            return
 
-        with st.spinner("Extracting audio..."):
-            audio_path = extract_audio(video_path)
-
-        with st.spinner("Transcribing speech..."):
-            text = transcribe(audio_path)
-
+        # Load model and detect accent
+        processor, model = load_model()
         with st.spinner("Detecting accent..."):
-            accent, confidence, reason = detect_accent(text)
+            accent, confidence = detect_accent(audio_path, processor, model)
+            st.success(f"🌍 Detected Accent: **{accent.title()}** with **{confidence:.2%}** confidence")
 
-        st.success(f"✅ Detected Accent: **{accent}**")
-        st.write(f"**Confidence Score:** {confidence}%")
-        st.write(f"**Explanation:** {reason}")
-        st.write(f"**Transcription:** {text}")
-
-        os.remove(video_path)
         os.remove(audio_path)
+        os.remove(tmp_file_path)
 
-    except Exception as e:
-        st.error(f"❌ Error: {e}")
+if __name__ == "__main__":
+    main()
