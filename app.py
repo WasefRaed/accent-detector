@@ -8,74 +8,68 @@ Original file is located at
 """
 
 import streamlit as st
-import tempfile
+import subprocess
 import os
-from moviepy.editor import VideoFileClip
+from pydub import AudioSegment
+from tempfile import NamedTemporaryFile
+
+from transformers import pipeline
 import torch
-from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2Processor
 import torchaudio
-import numpy as np
 
-# Load pre-trained accent classification model
+# Title
+st.title("🎙️ English Accent Detector")
+st.markdown("Upload a video file and we'll detect the English accent spoken in it.")
+
+# Upload video
+uploaded_file = st.file_uploader("Upload video (mp4, mov, avi, mkv)", type=["mp4", "mov", "avi", "mkv"])
+
+# Accent classifier
 @st.cache_resource
-def load_model():
-    model_name = "saattrupdan/accent-classifier"
-    model = Wav2Vec2ForSequenceClassification.from_pretrained(model_name)
-    processor = Wav2Vec2Processor.from_pretrained(model_name)
-    return model, processor
+def load_pipeline():
+    classifier = pipeline(
+        "audio-classification",
+        model="sandro-h/English-Accent-Classification",
+        device=0 if torch.cuda.is_available() else -1
+    )
+    return classifier
 
-model, processor = load_model()
+classifier = load_pipeline()
 
-# Audio processing function
-def process_audio(file_path):
-    speech_array, sampling_rate = torchaudio.load(file_path)
-    if sampling_rate != 16000:
-        resampler = torchaudio.transforms.Resample(orig_freq=sampling_rate, new_freq=16000)
-        speech_array = resampler(speech_array)
-    return speech_array.squeeze().numpy()
+if uploaded_file:
+    st.info("Processing your video...")
 
-# Prediction function
-def predict_accent(file_path):
-    audio = process_audio(file_path)
-    inputs = processor(audio, sampling_rate=16000, return_tensors="pt", padding=True)
-    with torch.no_grad():
-        logits = model(**inputs).logits
-    predicted_class_id = torch.argmax(logits).item()
-    score = torch.softmax(logits, dim=1)[0][predicted_class_id].item()
-    label = model.config.id2label[predicted_class_id]
-    return label, score
+    # Save video temporarily
+    with NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
+        temp_video.write(uploaded_file.read())
+        video_path = temp_video.name
 
-# Streamlit UI
-st.title("🎙️ English Accent Classifier")
+    # Define temp audio path
+    audio_path = video_path.replace(".mp4", ".wav")
 
-uploaded_file = st.file_uploader("Upload a video (MP4 or MOV) or audio (WAV, MP3)", type=["mp4", "mov", "wav", "mp3"])
+    # Extract audio using ffmpeg
+    try:
+        subprocess.run([
+            "ffmpeg", "-y", "-i", video_path,
+            "-vn", "-acodec", "pcm_s16le",
+            "-ar", "16000", "-ac", "1",  # mono, 16kHz
+            audio_path
+        ], check=True)
 
-if uploaded_file is not None:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_file.name) as tmp:
-        tmp.write(uploaded_file.read())
-        tmp_path = tmp.name
+        # Preview audio
+        st.audio(audio_path, format="audio/wav")
 
-    audio_path = tmp_path
+        # Load audio
+        waveform, sample_rate = torchaudio.load(audio_path)
 
-    # If video, extract audio
-    if uploaded_file.type.startswith("video"):
-        audio_path = tmp_path + ".wav"
-        try:
-            clip = VideoFileClip(tmp_path)
-            clip.audio.write_audiofile(audio_path, codec='pcm_s16le')
-        except Exception as e:
-            st.error(f"❌ Error extracting audio from video: {e}")
-            os.remove(tmp_path)
-            st.stop()
+        # Run classification
+        result = classifier(audio_path)
+        top_result = result[0]
 
-    st.audio(audio_path)
-    with st.spinner("Analyzing..."):
-        try:
-            label, score = predict_accent(audio_path)
-            st.success(f"✅ Detected Accent: **{label}** with **{score:.2%}** confidence")
-        except Exception as e:
-            st.error(f"❌ Error analyzing audio: {e}")
+        # Show prediction
+        st.success(f"**Accent:** {top_result['label']}")
+        st.info(f"**Confidence:** {top_result['score']:.2%}")
 
-    os.remove(tmp_path)
-    if audio_path != tmp_path:
-        os.remove(audio_path)
+    except subprocess.CalledProcessError as e:
+        st.error("❌ Error extracting audio with ffmpeg.")
+        st.text(str(e))
