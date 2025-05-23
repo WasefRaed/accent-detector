@@ -8,95 +8,74 @@ Original file is located at
 """
 
 import streamlit as st
-import os
 import tempfile
-import subprocess
+import os
 from moviepy.editor import VideoFileClip
-from pydub import AudioSegment
 import torch
 from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2Processor
+import torchaudio
+import numpy as np
 
-MODEL_ID = "s3prl/s3prl-voice-type-classifier-apc"
-LABELS = ["american", "british", "australian", "indian", "others"]  # example
-
+# Load pre-trained accent classification model
 @st.cache_resource
 def load_model():
-    processor = Wav2Vec2Processor.from_pretrained(MODEL_ID)
-    model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_ID)
-    return processor, model
+    model_name = "saattrupdan/accent-classifier"
+    model = Wav2Vec2ForSequenceClassification.from_pretrained(model_name)
+    processor = Wav2Vec2Processor.from_pretrained(model_name)
+    return model, processor
 
-def validate_mp4(file_path):
-    try:
-        result = subprocess.run(
-            ['ffmpeg', '-v', 'error', '-i', file_path, '-f', 'null', '-'],
-            stderr=subprocess.PIPE, stdout=subprocess.PIPE
-        )
-        return result.returncode == 0
-    except Exception as e:
-        st.error(f"Validation failed: {e}")
-        return False
+model, processor = load_model()
 
-def repair_mp4(input_path, output_path):
-    try:
-        subprocess.run(
-            ['ffmpeg', '-i', input_path, '-c', 'copy', '-movflags', 'faststart', output_path],
-            check=True
-        )
-        return True
-    except subprocess.CalledProcessError:
-        return False
+# Audio processing function
+def process_audio(file_path):
+    speech_array, sampling_rate = torchaudio.load(file_path)
+    if sampling_rate != 16000:
+        resampler = torchaudio.transforms.Resample(orig_freq=sampling_rate, new_freq=16000)
+        speech_array = resampler(speech_array)
+    return speech_array.squeeze().numpy()
 
-def extract_audio_from_video(video_path):
-    try:
-        clip = VideoFileClip(video_path)
-        temp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        clip.audio.write_audiofile(temp_audio.name, codec='pcm_s16le')
-        return temp_audio.name
-    except Exception as e:
-        st.error(f"❌ Failed to extract audio: {e}")
-        return None
-
-def detect_accent(audio_path, processor, model):
-    audio = AudioSegment.from_wav(audio_path).set_channels(1).set_frame_rate(16000)
-    samples = audio.get_array_of_samples()
-    inputs = processor(samples, sampling_rate=16000, return_tensors="pt", padding=True)
+# Prediction function
+def predict_accent(file_path):
+    audio = process_audio(file_path)
+    inputs = processor(audio, sampling_rate=16000, return_tensors="pt", padding=True)
     with torch.no_grad():
         logits = model(**inputs).logits
-        predicted_class = logits.argmax().item()
-    return LABELS[predicted_class], torch.nn.functional.softmax(logits, dim=1)[0][predicted_class].item()
+    predicted_class_id = torch.argmax(logits).item()
+    score = torch.softmax(logits, dim=1)[0][predicted_class_id].item()
+    label = model.config.id2label[predicted_class_id]
+    return label, score
 
-def main():
-    st.title("🎙️ English Accent Detection App")
+# Streamlit UI
+st.title("🎙️ English Accent Classifier")
 
-    uploaded_file = st.file_uploader("Upload a video (MP4 format)", type=["mp4"])
+uploaded_file = st.file_uploader("Upload a video (MP4 or MOV) or audio (WAV, MP3)", type=["mp4", "mov", "wav", "mp3"])
 
-    if uploaded_file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            tmp_file_path = tmp_file.name
+if uploaded_file is not None:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_file.name) as tmp:
+        tmp.write(uploaded_file.read())
+        tmp_path = tmp.name
 
-        # Validate and optionally repair the video
-        if not validate_mp4(tmp_file_path):
-            st.warning("⚠️ Video is missing metadata. Attempting repair...")
-            repaired_path = tmp_file_path + "_repaired.mp4"
-            if not repair_mp4(tmp_file_path, repaired_path):
-                st.error("❌ Failed to repair video. Please upload a different file.")
-                return
-            tmp_file_path = repaired_path
+    audio_path = tmp_path
 
-        # Extract audio
-        audio_path = extract_audio_from_video(tmp_file_path)
-        if not audio_path:
-            return
+    # If video, extract audio
+    if uploaded_file.type.startswith("video"):
+        audio_path = tmp_path + ".wav"
+        try:
+            clip = VideoFileClip(tmp_path)
+            clip.audio.write_audiofile(audio_path, codec='pcm_s16le')
+        except Exception as e:
+            st.error(f"❌ Error extracting audio from video: {e}")
+            os.remove(tmp_path)
+            st.stop()
 
-        # Load model and detect accent
-        processor, model = load_model()
-        with st.spinner("Detecting accent..."):
-            accent, confidence = detect_accent(audio_path, processor, model)
-            st.success(f"🌍 Detected Accent: **{accent.title()}** with **{confidence:.2%}** confidence")
+    st.audio(audio_path)
+    with st.spinner("Analyzing..."):
+        try:
+            label, score = predict_accent(audio_path)
+            st.success(f"✅ Detected Accent: **{label}** with **{score:.2%}** confidence")
+        except Exception as e:
+            st.error(f"❌ Error analyzing audio: {e}")
 
+    os.remove(tmp_path)
+    if audio_path != tmp_path:
         os.remove(audio_path)
-        os.remove(tmp_file_path)
-
-if __name__ == "__main__":
-    main()

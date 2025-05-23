@@ -1,11 +1,6 @@
 streamlit
+moviepy
 torch
 transformers
 torchaudio
-moviepy==1.0.3
-imageio-ffmpeg==0.4.7
-requests
-pydub
-ffmpeg-python
-
 
