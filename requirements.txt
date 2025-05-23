@@ -1,6 +1,7 @@
 streamlit
 moviepy
+imageio_ffmpeg
+pydub
+transformers
 torch
 torchaudio
-transformers
-pydub
