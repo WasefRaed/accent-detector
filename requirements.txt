@@ -7,5 +7,5 @@ imageio-ffmpeg==0.4.7
 requests
 pydub
 ffmpeg-python
-python-3.10
+
 
