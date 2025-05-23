@@ -10,23 +10,19 @@ Original file is located at
 import streamlit as st
 import subprocess
 import os
-from pydub import AudioSegment
 from tempfile import NamedTemporaryFile
 
-from transformers import pipeline
 import torch
 import torchaudio
+from transformers import pipeline
 
-# Title
 st.title("🎙️ English Accent Detector")
-st.markdown("Upload a video file and we'll detect the English accent spoken in it.")
+st.markdown("Upload a video file, and we'll detect the English accent spoken in it.")
 
-# Upload video
 uploaded_file = st.file_uploader("Upload video (mp4, mov, avi, mkv)", type=["mp4", "mov", "avi", "mkv"])
 
-# Accent classifier
 @st.cache_resource
-def load_pipeline():
+def load_model():
     classifier = pipeline(
         "audio-classification",
         model="sandro-h/English-Accent-Classification",
@@ -34,17 +30,16 @@ def load_pipeline():
     )
     return classifier
 
-classifier = load_pipeline()
+classifier = load_model()
 
 if uploaded_file:
-    st.info("Processing your video...")
+    st.info("Processing video and extracting audio...")
 
-    # Save video temporarily
+    # Save uploaded video
     with NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
         temp_video.write(uploaded_file.read())
         video_path = temp_video.name
 
-    # Define temp audio path
     audio_path = video_path.replace(".mp4", ".wav")
 
     # Extract audio using ffmpeg
@@ -56,20 +51,16 @@ if uploaded_file:
             audio_path
         ], check=True)
 
-        # Preview audio
+        # Preview extracted audio
         st.audio(audio_path, format="audio/wav")
-
-        # Load audio
-        waveform, sample_rate = torchaudio.load(audio_path)
 
         # Run classification
         result = classifier(audio_path)
         top_result = result[0]
 
-        # Show prediction
+        # Show result
         st.success(f"**Accent:** {top_result['label']}")
         st.info(f"**Confidence:** {top_result['score']:.2%}")
 
-    except subprocess.CalledProcessError as e:
-        st.error("❌ Error extracting audio with ffmpeg.")
-        st.text(str(e))
+    except subprocess.CalledProcessError:
+        st.error("❌ ffmpeg failed to extract audio.")

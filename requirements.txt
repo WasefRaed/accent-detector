@@ -1,6 +1,4 @@
 streamlit
-ffmpeg-python
-pydub
 transformers
 torch
 torchaudio
