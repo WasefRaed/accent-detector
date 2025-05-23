@@ -1,5 +1,6 @@
 streamlit
 moviepy
 torch
-transformers
 torchaudio
+transformers
+pydub
